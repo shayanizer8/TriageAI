@@ -9,7 +9,7 @@ Responsibilities:
   5. Deliver the appointment confirmation at call end
 
 This agent wraps LiveKit's voice Agent and wires up STT (Groq),
-TTS (Cartesia), and LLM (Claude Haiku 3.5) through the Agents SDK plugins.
+TTS (Cartesia), through the Agents SDK plugins.
 """
 from __future__ import annotations
 
