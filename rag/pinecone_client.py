@@ -3,7 +3,7 @@ Pinecone client — upsert and query operations for the medical KB index.
 
 Index schema per vector:
   id       : "<source>-<icd_code or row_id>"
-  values   : list[float] (768-dim, text-embedding-004)
+  values   : list[float]
   metadata : {
       icd_code       : str,
       condition_name : str,
