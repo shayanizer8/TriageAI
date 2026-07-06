@@ -1,0 +1,72 @@
+version: "3.9"
+
+# ============================================================
+# TriageAI — Local Development Stack
+# Run: docker-compose up -d
+# ============================================================
+
+services:
+  # ----------------------------------------------------------
+  # PostgreSQL — persistent storage
+  # ----------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: triageai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: triageai
+      POSTGRES_USER: triage
+      POSTGRES_PASSWORD: triage_password
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U triage -d triageai"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------
+  # Redis — per-call session state cache
+  # ----------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: triageai-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ----------------------------------------------------------
+  # FastAPI — HTTP backend (triage, scheduling, webhooks)
+  # ----------------------------------------------------------
+  api:
+    build: .
+    container_name: triageai-api
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - .:/app
+    environment:
+      DATABASE_URL: postgresql+asyncpg://triage:triage_password@postgres:5432/triageai
+      REDIS_URL: redis://redis:6379
+
+volumes:
+  postgres_data:
+  redis_data:
