@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Data files (download separately — do not commit)
+data/*.csv
+data/*.json
+data/*.zip
+
+# Database
+*.db
+*.sqlite3
+
+# Alembic versions (keep directory, not generated files)
+alembic/versions/*.py
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.cache/
+
+# Local database backups
+*.sql
+*.dump
