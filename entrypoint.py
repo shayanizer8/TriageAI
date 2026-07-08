@@ -38,9 +38,10 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 from agents.intake_agent import IntakeAgent
 from agents.symptom_analyzer import SymptomAnalyzer
+from agents.specialist_router import SpecialistRouter
 from graph.state import TriageState, default_state
 from graph.supervisor import is_emergency
-from graph.triage_graph import triage_graph
+from graph.triage_graph import triage_graph, format_spoken_datetime
 from config.settings import get_settings
 
 # Configure LangSmith tracing
@@ -104,12 +105,15 @@ async def extract_patient_info(transcript: list[str]) -> dict | None:
         
         system_prompt = (
             "You are a clinical data extraction assistant.\n"
-            "Analyze the conversation transcript between a Patient and an AI Agent, and extract the patient's personal details.\n\n"
+            "Analyze the conversation transcript between a Patient and an AI Agent, and extract the patient's personal and clinical details.\n\n"
             "Format your response as a JSON object with the following keys:\n"
             "- patient_name: Patient's full name (or null if not found)\n"
             "- patient_dob: Patient's date of birth. Convert it to 'YYYY-MM-DD' format (e.g. '1985-01-15'). If not found or incomplete, output null.\n"
             "- patient_phone: Patient's phone number (or null if not found)\n"
-            "- patient_email: Patient's email address (or null if not found)\n\n"
+            "- patient_email: Patient's email address (or null if not found)\n"
+            "- onset_trigger: What triggered the complaint — injury, activity, event, or 'spontaneous' if nothing specific. (or null if not discussed)\n"
+            "- current_treatment: Any medications, remedies, or treatments the patient has already tried. (or null if not discussed)\n"
+            "- known_allergies: Any medication allergies the patient mentioned. (or null if not discussed)\n\n"
             "Output ONLY the raw JSON object. Do not include markdown code block formatting or any conversational text."
         )
         user_msg = "\n".join(transcript)
@@ -251,6 +255,116 @@ async def filler_message_timer(intake_agent: IntakeAgent, stop_event: asyncio.Ev
         pass
 
 
+async def wait_for_patient_response(state: TriageState, timeout: float = 15.0) -> str:
+    """
+    Wait for the next patient utterance to appear in the transcript.
+    Returns the utterance text or empty string on timeout.
+    """
+    current_len = len(state.get("transcript", []))
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        transcript = state.get("transcript", [])
+        if len(transcript) > current_len:
+            # Find the latest patient utterance
+            for entry in reversed(transcript[current_len:]):
+                if entry.startswith("Patient:"):
+                    return entry.replace("Patient: ", "").strip()
+        await asyncio.sleep(0.5)
+    return ""
+
+
+def _is_acceptance(text: str) -> bool:
+    """Check if the patient's response indicates acceptance of the proposed slot."""
+    text_lower = text.lower().strip()
+    accept_phrases = [
+        "yes", "yeah", "yep", "sure", "okay", "ok", "that works",
+        "sounds good", "perfect", "great", "fine", "absolutely",
+        "let's do it", "book it", "go ahead", "please", "that's fine",
+        "works for me", "i'll take it",
+    ]
+    return any(phrase in text_lower for phrase in accept_phrases)
+
+
+async def interactive_booking(
+    intake_agent: IntakeAgent,
+    state: TriageState,
+    router: SpecialistRouter,
+) -> None:
+    """
+    Proposes candidate slots to the patient and books the one they accept.
+    Falls back to auto-booking the first slot if the patient declines all options.
+    """
+    candidates = state.get("candidate_slots", [])
+    room_name = state.get("room_id", "unknown")
+
+    if not candidates:
+        logger.warning("No candidate slots available for interactive booking | room=%s", room_name)
+        return
+
+    for i, slot in enumerate(candidates):
+        spoken_dt = format_spoken_datetime(slot["datetime"])
+        proposal = (
+            f"I have an opening on {spoken_dt} "
+            f"with {slot['doctor_name']} in {slot['specialty']}. "
+            "Does that work for you?"
+        )
+        state["transcript"] = state.get("transcript", []) + [f"Agent: {proposal}"]
+        await intake_agent.say(proposal)
+
+        # Wait for TTS to finish speaking + patient response time
+        word_count = len(proposal.split())
+        await asyncio.sleep(max(6.0, word_count / 2.5))
+
+        # Listen for patient's response
+        response = await wait_for_patient_response(state, timeout=15.0)
+        logger.info("Patient response to slot %d: %r | room=%s", i + 1, response, room_name)
+
+        if _is_acceptance(response):
+            # Book this slot
+            booked = await router.book_slot(slot["slot_id"])
+            if booked:
+                spoken_dt_booked = format_spoken_datetime(booked["datetime"])
+                confirmation = (
+                    f"I have booked your appointment with {booked['doctor_name']} "
+                    f"in {booked['specialty']} for {spoken_dt_booked}. "
+                    "You will receive a text message and email shortly with all the details. "
+                    "Is there anything else you need before I let you go?"
+                )
+                state["confirmation_text"] = confirmation
+                logger.info("Slot %d accepted and booked | room=%s", i + 1, room_name)
+                return
+            else:
+                err_msg = "I'm sorry, there was an issue booking that slot. Let me try another option."
+                state["transcript"] = state.get("transcript", []) + [f"Agent: {err_msg}"]
+                await intake_agent.say(err_msg)
+                await asyncio.sleep(4.0)
+                continue
+        else:
+            if i < len(candidates) - 1:
+                next_msg = "No problem, let me check another option for you."
+                state["transcript"] = state.get("transcript", []) + [f"Agent: {next_msg}"]
+                await intake_agent.say(next_msg)
+                await asyncio.sleep(3.0)
+
+    # If all slots were declined or failed, auto-book the first available
+    logger.info("All proposals declined — auto-booking first slot | room=%s", room_name)
+    if candidates:
+        booked = await router.book_slot(candidates[0]["slot_id"])
+        if booked:
+            spoken_dt_booked = format_spoken_datetime(booked["datetime"])
+            state["confirmation_text"] = (
+                f"I've gone ahead and booked the earliest available slot for you — "
+                f"{spoken_dt_booked} with {booked['doctor_name']} in {booked['specialty']}. "
+                "Our office will call you if you need to reschedule. "
+                "You will receive a confirmation email shortly."
+            )
+        else:
+            state["confirmation_text"] = (
+                "I wasn't able to book an appointment right now. "
+                "Our office will contact you shortly to schedule one."
+            )
+
+
 # ---------------------------------------------------------------------------
 # Main LiveKit entrypoint
 # ---------------------------------------------------------------------------
@@ -293,6 +407,9 @@ async def entrypoint(ctx: JobContext) -> None:
         await intake_agent.wait_for_completion()
         logger.info("Intake complete | room=%s urgency=%d", room_name, state.get("urgency_score", 5))
 
+        # Put agent in silent standby mode to prevent LLM from responding during booking
+        await intake_agent.set_silent_standby()
+
         # Start background filler message timer
         filler_stop_event = asyncio.Event()
         filler_task = asyncio.create_task(
@@ -318,11 +435,17 @@ async def entrypoint(ctx: JobContext) -> None:
                         state["patient_phone"] = extracted["patient_phone"]
                     if extracted.get("patient_email"):
                         state["patient_email"] = extracted["patient_email"]
+                    if extracted.get("onset_trigger"):
+                        state["onset_trigger"] = extracted["onset_trigger"]
+                    if extracted.get("current_treatment"):
+                        state["current_treatment"] = extracted["current_treatment"]
+                    if extracted.get("known_allergies"):
+                        state["known_allergies"] = extracted["known_allergies"]
                     logger.info("Extracted patient info: %s", extracted)
             except Exception as exc:
                 logger.error("Failed to extract patient info: %s", exc)
 
-            # 11. Run LangGraph routing graph
+            # 11. Run LangGraph routing graph (finds candidate slots, does NOT book)
             try:
                 final_state = await triage_graph.ainvoke(state)
                 state.update(final_state)
@@ -334,22 +457,41 @@ async def entrypoint(ctx: JobContext) -> None:
             filler_stop_event.set()
             filler_task.cancel()
 
-        # 12. Speak the confirmation to the patient
-        confirmation_text = state.get("confirmation_text", "")  # type: ignore[attr-defined]
-        logger.info(
-            "Confirmation text for room=%s: %r (length=%d)",
-            room_name, confirmation_text[:80] if confirmation_text else "<empty>",
-            len(confirmation_text) if confirmation_text else 0,
-        )
-        if confirmation_text:
-            await intake_agent.say(confirmation_text)
-            # Sleep for a duration proportional to the word count, with a minimum of 10 seconds
-            word_count = len(confirmation_text.split())
-            sleep_time = max(10.0, word_count / 2.0)
-            logger.info("Sleeping %.1fs for TTS playout (%d words) | room=%s", sleep_time, word_count, room_name)
-            await asyncio.sleep(sleep_time)
+        # 12. Interactive booking or emergency confirmation
+        if state.get("path") == "EMERGENCY":
+            # Emergency — speak the pre-built confirmation immediately
+            confirmation_text = state.get("confirmation_text", "")
+            if confirmation_text:
+                state["transcript"] = state.get("transcript", []) + [f"Agent: {confirmation_text}"]
+                await intake_agent.say(confirmation_text)
+                word_count = len(confirmation_text.split())
+                await asyncio.sleep(max(10.0, word_count / 2.0))
         else:
-            logger.warning("No confirmation text — skipping speech | room=%s", room_name)
+            # Routine/urgent — propose slots interactively
+            candidates = state.get("candidate_slots", [])
+            if candidates:
+                router = SpecialistRouter(state)
+                await interactive_booking(intake_agent, state, router)
+
+                # Speak the final confirmation (set by interactive_booking)
+                confirmation_text = state.get("confirmation_text", "")
+                if confirmation_text:
+                    state["transcript"] = state.get("transcript", []) + [f"Agent: {confirmation_text}"]
+                    await intake_agent.say(confirmation_text)
+                    word_count = len(confirmation_text.split())
+                    sleep_time = max(10.0, word_count / 2.0)
+                    logger.info("Sleeping %.1fs for TTS playout (%d words) | room=%s", sleep_time, word_count, room_name)
+                    await asyncio.sleep(sleep_time)
+            else:
+                # No slots found — speak fallback confirmation from triage_graph
+                confirmation_text = state.get("confirmation_text", "")
+                if confirmation_text:
+                    state["transcript"] = state.get("transcript", []) + [f"Agent: {confirmation_text}"]
+                    await intake_agent.say(confirmation_text)
+                    word_count = len(confirmation_text.split())
+                    await asyncio.sleep(max(10.0, word_count / 2.0))
+                else:
+                    logger.warning("No confirmation text — skipping speech | room=%s", room_name)
 
     finally:
         # 13. End the call and guarantee DB persistence (shielded from cancellation)
@@ -375,6 +517,12 @@ async def entrypoint(ctx: JobContext) -> None:
                         state["patient_phone"] = extracted["patient_phone"]
                     if extracted.get("patient_email"):
                         state["patient_email"] = extracted["patient_email"]
+                    if extracted.get("onset_trigger"):
+                        state["onset_trigger"] = extracted["onset_trigger"]
+                    if extracted.get("current_treatment"):
+                        state["current_treatment"] = extracted["current_treatment"]
+                    if extracted.get("known_allergies"):
+                        state["known_allergies"] = extracted["known_allergies"]
             except Exception as exc:
                 logger.error("Failed to extract patient info in finally: %s", exc)
 
