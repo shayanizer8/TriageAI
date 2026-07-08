@@ -157,7 +157,7 @@ async def _execute_tool(tool_name: str, tool_input: dict) -> str:
 
 class SpecialistRouter:
     """
-    Uses Cerebras (gemma-4-31b) with tool calling to query the Mock HIS API
+    Uses Mistral with tool calling to query the Mock HIS API
     and book the best available appointment for the patient.
     """
 
@@ -167,6 +167,74 @@ class SpecialistRouter:
             api_key=settings.mistral_api_key,
             base_url="https://api.mistral.ai/v1",
         )
+
+    async def find_candidate_slots(self, max_slots: int = 2) -> list[dict]:
+        """
+        Find candidate appointment slots without booking.
+        Returns a list of dicts: [{doctor_name, specialty, slot_id, datetime}, ...]
+        """
+        specialty = self.state.get("required_specialty", "General Practice")
+        candidates: list[dict] = []
+
+        try:
+            doctors_result = await _call_his_api("GET", "/doctors", {"specialty": specialty})
+            doctors = doctors_result if isinstance(doctors_result, list) else []
+
+            if not doctors:
+                # Fallback to General Practice
+                doctors_result = await _call_his_api("GET", "/doctors", {"specialty": "General Practice"})
+                doctors = doctors_result if isinstance(doctors_result, list) else []
+
+            for doc in doctors:
+                if len(candidates) >= max_slots:
+                    break
+                doc_id = doc.get("id")
+                doc_name = doc.get("name", "Doctor")
+                doc_specialty = doc.get("specialty", "General Practice")
+                try:
+                    slots_result = await _call_his_api("GET", "/slots", {"doctor_id": str(doc_id)})
+                    slots = slots_result if isinstance(slots_result, list) else []
+                    for slot in slots:
+                        if len(candidates) >= max_slots:
+                            break
+                        candidates.append({
+                            "doctor_name": doc_name,
+                            "specialty": doc_specialty,
+                            "slot_id": str(slot.get("id")),
+                            "datetime": slot.get("datetime", ""),
+                        })
+                except Exception:
+                    continue  # doctor has no available slots
+
+        except Exception as exc:
+            logger.error("Failed to find candidate slots: %s", exc)
+
+        return candidates
+
+    async def book_slot(self, slot_id: str) -> dict | None:
+        """Book a specific slot by ID. Returns appointment details or None."""
+        patient_id = self.state.get("patient_id", "")
+        call_id = self.state.get("call_id", "")
+        try:
+            result = await _call_his_api("POST", "/book", {
+                "slot_id": slot_id,
+                "patient_id": patient_id,
+                "call_id": call_id,
+            })
+            if "error" not in result:
+                appointment_details = {
+                    "doctor_name": result.get("doctor", {}).get("name", "your specialist"),
+                    "specialty": result.get("doctor", {}).get("specialty", "General Practice"),
+                    "department": result.get("doctor", {}).get("department", "Outpatient Clinic"),
+                    "datetime": result.get("slot", {}).get("datetime", "the scheduled time"),
+                    "appointment_id": result.get("id"),
+                    "slot_id": result.get("slot_id"),
+                }
+                self.state["appointment_details"] = appointment_details
+                return appointment_details
+        except Exception as exc:
+            logger.error("Failed to book slot %s: %s", slot_id, exc)
+        return None
 
     async def route_and_book(self) -> dict | None:
         """
