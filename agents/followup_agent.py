@@ -52,14 +52,24 @@ def _build_summary_prompt(state: TriageState) -> str:
     specialty = appointment.get("specialty", "")
     appt_datetime = appointment.get("datetime", "the scheduled time")
     patient_name = state.get("patient_name", "Patient")
+    onset = state.get("onset_trigger", "")
+    treatment = state.get("current_treatment", "")
+    allergies = state.get("known_allergies", "")
 
-    return (
+    prompt = (
         f"Patient name: {patient_name}\n"
         f"Reported symptoms: {symptoms}\n"
         f"Doctor: {doctor} ({specialty})\n"
-        f"Appointment: {appt_datetime}\n\n"
-        "Please write the follow-up message."
+        f"Appointment: {appt_datetime}\n"
     )
+    if onset:
+        prompt += f"Onset/trigger: {onset}\n"
+    if treatment:
+        prompt += f"Current treatment tried: {treatment}\n"
+    if allergies:
+        prompt += f"Known allergies: {allergies}\n"
+    prompt += "\nPlease write the follow-up message."
+    return prompt
 
 
 @retry(
