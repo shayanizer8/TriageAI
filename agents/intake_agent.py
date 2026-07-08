@@ -36,26 +36,39 @@ INTAKE_SYSTEM_PROMPT = f"""You are a warm, professional medical triage assistant
 Your role is to collect information from the patient during a phone call.
 
 Your tone: calm, empathetic, clear. Never use medical jargon the patient won't understand.
-Your goal: gather the following information step-by-step in natural conversation:
 
-1. Patient's full name
-2. Date of birth (for identity verification)
-3. Phone number (confirm it from caller ID if possible)
-4. Email address (for follow-up summary)
-5. Chief complaint — "what brings you in today?"
-6. Symptom details — how long, severity 1-10, any relevant history
+CONVERSATION ORDER — follow this exact sequence:
+
+PHASE 1 — CHIEF COMPLAINT (ask first, before any demographics):
+  1. "What brings you in today?" — the patient's main reason for calling.
+
+PHASE 2 — CLINICAL FOLLOW-UPS (adapt to what the patient describes):
+  2. Onset/trigger — "Did something specific trigger this — like an injury, activity, or event — or did it come on by itself?" Ask this for EVERY complaint.
+  3. Duration — "How long has this been going on?"
+  4. Severity — "On a scale of 1 to 10, how would you rate it?"
+  5. Complaint-specific questions (pick what's relevant):
+     - PAIN complaints: Ask exactly where the pain is and whether it spreads or radiates to other areas.
+     - SKIN complaints: Ask if it's spreading, itchy, or changing.
+     - RESPIRATORY complaints: Ask about difficulty breathing, cough type (dry/wet), and fever.
+     - GI complaints: Ask about nausea, vomiting, and appetite changes.
+     - NEUROLOGICAL complaints: Ask about dizziness, vision changes, or numbness.
+  6. Current treatment — "Have you tried anything for it so far — any medication, rest, or home remedies?"
+  7. Allergies — "Do you have any known medication allergies?"
+
+PHASE 3 — PATIENT DEMOGRAPHICS (collect after clinical picture is clear):
+  8. Full name
+  9. Date of birth
+  10. Phone number
+  11. Email address — After the patient states their email, spell it back character by character for confirmation. Use hyphens between characters. Example: "So that's J-O-H-N dot D-O-E at G-M-A-I-L dot com — is that right?" Wait for the patient to confirm before moving on.
 
 RULES:
 - Ask ONE question at a time. Do not overwhelm the patient.
 - If the patient sounds distressed, acknowledge it: "I can hear this is worrying you, you're doing great."
 - If the patient says something like "chest pain", "can't breathe", "stroke", "unconscious" — immediately
-  say: "This sounds very serious. Please hold while I connect you to emergency services." 
+  say: "This sounds very serious. Please hold while I connect you to emergency services."
   Then stop asking questions.
+- When ALL information is collected (including clinical follow-ups and all demographics: name, date of birth, phone, and email), say EXACTLY: "Thank you. Let me check available appointments for you now." Do NOT say this phrase or anything containing "check available appointments" until ALL demographics have been collected.
 - Keep responses SHORT (under 30 words). This is a phone call, not a chat.
-- When all information is collected, say EXACTLY: "Thank you. Let me find you the right specialist now."
-  This signals the end of intake to the system.
-
-Begin by greeting the patient and asking for their name.
 """
 
 
@@ -115,9 +128,22 @@ class IntakeAgent:
         await asyncio.sleep(1.0)  # Brief pause for audio to stabilise
         self._session.say(
             f"Hello, thank you for calling {settings.hospital_name}. "
-            "I'm your AI triage assistant. Can I start with your full name please?"
+            "I'm your AI triage assistant. Can you tell me what's brought you in today?"
         )
         logger.info("Intake Agent started in room: %s", self.state["room_id"])
+
+    async def set_silent_standby(self) -> None:
+        """Put the agent in silent standby mode so its LLM does not respond during booking."""
+        logger.info("Setting IntakeAgent to silent standby mode")
+        if self._session:
+            try:
+                self._session.update_options(turn_detection="manual")
+            except Exception as e:
+                logger.warning("Failed to set turn_detection to manual: %s", e)
+        await self._agent.update_instructions(
+            "You are in silent standby mode. Under no circumstances should you speak, respond, or generate any text. "
+            "Remain completely silent."
+        )
 
     async def wait_for_completion(self) -> None:
         """Block until intake is complete (or interrupted)."""
@@ -182,6 +208,7 @@ class IntakeAgent:
                 self.state["transcript"] = (
                     self.state.get("transcript", []) + [f"Agent: {text_content}"]
                 )
-                # Check if agent signalled end of intake
-                if "find you the right specialist" in text_content.lower():
+                # Check if agent signalled end of intake (strict match)
+                cleaned_text = text_content.lower().replace(",", "").replace("!", "").replace(".", "").strip()
+                if "thank you let me check available appointments for you now" in cleaned_text:
                     self._completion_event.set()
