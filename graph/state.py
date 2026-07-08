@@ -61,11 +61,15 @@ class TriageState(TypedDict, total=False):
     urgency_score: int            # 1–5; default 5 (assume routine)
     urgency_label: str            # "EMERGENCY" | "URGENT" | "ROUTINE"
     icd_matches: list[ICDMatch]   # top RAG results from Pinecone
+    onset_trigger: Optional[str]  # what triggered the complaint (injury, activity, spontaneous)
+    current_treatment: Optional[str]  # medications/remedies the patient has already tried
+    known_allergies: Optional[str]    # patient-reported medication allergies
 
     # ------------------------------------------------------------------
     # Routing & booking
     # ------------------------------------------------------------------
     required_specialty: Optional[str]
+    candidate_slots: list[dict]       # proposed slots before patient confirms
     appointment_id: Optional[str]
     appointment_details: Optional[AppointmentDetails]
 
@@ -108,7 +112,11 @@ def default_state(room_id: str) -> TriageState:
         urgency_score=5,           # optimistic default — assume routine
         urgency_label="ROUTINE",
         icd_matches=[],
+        onset_trigger=None,
+        current_treatment=None,
+        known_allergies=None,
         required_specialty=None,
+        candidate_slots=[],
         appointment_id=None,
         appointment_details=None,
         confirmation_text=None,
