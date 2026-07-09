@@ -98,11 +98,12 @@ def default_state(room_id: str) -> TriageState:
     Call this when a new LiveKit room is created.
     """
     from datetime import datetime, timezone
+    import uuid
     return TriageState(
         room_id=room_id,
-        call_id=None,
+        call_id=str(uuid.uuid4()),
         started_at=datetime.now(timezone.utc).isoformat(),
-        patient_id=None,
+        patient_id=str(uuid.uuid4()),
         patient_name=None,
         patient_dob=None,
         patient_phone=None,
