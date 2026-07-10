@@ -5,7 +5,6 @@ Runs in parallel with the Intake Agent. On every patient utterance:
   1. Queries Pinecone for matching ICD-10 conditions
   2. Sends transcript + RAG results to LLM for urgency scoring
   3. Updates urgency_score + symptoms + icd_matches in shared TriageState
-  4. Persists state to Redis after each update
 """
 from __future__ import annotations
 
@@ -58,7 +57,21 @@ RULES:
 - "Can't breathe" = score 1.
 - Pediatric patients (under 12) should be scored at least one level higher.
 - Extract specific symptoms as a flat list of medical keyword strings.
-- Determine the required medical specialty.
+- Clarify Ambiguous Symptoms (Triage Probing):
+  If the patient describes an ambiguous or vague symptom that could be an emergency OR routine depending on details (e.g. general "tightness", generic "headache", generic "chest discomfort", general "numbness" without other signs), do NOT assign a score of 1 or 2 yet. Instead, assign a score of 3 (URGENT) to allow the Intake Agent to ask clarifying questions. Only upgrade to a score of 1 or 2 (EMERGENCY/IMMEDIATE) once the patient explicitly confirms critical red-flag details (e.g., the tightness is in the chest/heart region, the pain radiates to the arm/jaw, the headache was a sudden "thunderclap", or there is active severe shortness of breath).
+- Psychiatric / Mental Health Complaints:
+  For psychiatric, psychological, or mental health complaints (e.g. general anxiety, panic, depression, stress, loneliness), do NOT assign an emergency score of 1 or 2 (EMERGENCY/IMMEDIATE) unless the patient explicitly expresses active intent of self-harm, suicidal ideation, or severe psychotic detachment. High ratings of subjective emotional tension (e.g. 9/10 tension) are URGENT (Score 3) and should be routed to Psychiatry, not redirected to 911/ED.
+- Determine the required medical specialty. You MUST choose one of the following exact specialties:
+  * Cardiology
+  * Emergency Medicine
+  * General Practice
+  * Neurology
+  * Pulmonology
+  * Gastroenterology
+  * Orthopaedics
+  * Dermatology
+  * Psychiatry
+  * Paediatrics
 
 You MUST respond with ONLY valid JSON in this exact format:
 {
@@ -66,8 +79,22 @@ You MUST respond with ONLY valid JSON in this exact format:
   "symptoms": ["<symptom>", ...],
   "required_specialty": "<specialty name>",
   "reasoning": "<one sentence max>",
-  "icd_codes_used": ["<ICD code>", ...]
+  "icd_codes_used": ["<ICD code>", ...],
+  "indicators": {
+    "cardiac_red_flags": <true/false>,
+    "respiratory_distress": <true/false>,
+    "stroke_neurological_deficits": <true/false>,
+    "active_uncontrolled_bleeding": <true/false>,
+    "active_self_harm_or_suicidal_intent": <true/false>
+  }
 }
+
+INDICATORS RULES:
+- cardiac_red_flags: set to true ONLY for acute cardiac symptoms (e.g., chest pain/pressure/squeezing radiating to arm/jaw, or suspected acute heart attack/angina).
+- respiratory_distress: set to true ONLY if the patient is experiencing severe difficulty breathing, acute respiratory failure, throat swelling/anaphylaxis, or stridor.
+- stroke_neurological_deficits: set to true ONLY for acute signs of stroke (e.g., one-sided facial drooping, one-sided limb weakness, sudden slurred speech, or acute loss of balance).
+- active_uncontrolled_bleeding: set to true ONLY for severe, life-threatening hemorrhage (e.g., arterial bleeding, severe active hematemesis, or traumatic amputation).
+- active_self_harm_or_suicidal_intent: set to true ONLY if the patient expresses active suicidal ideation, intent to self-harm, or severe psychotic detachment.
 """
 
 
@@ -142,6 +169,15 @@ class SymptomAnalyzer:
         if not transcript:
             return
 
+        # Skip analysis if we have transitioned to Phase 3 (Demographics)
+        # We can detect this if the last agent utterance asked for name, DOB, phone, or email.
+        agent_lines = [t for t in transcript if t.startswith("Agent:")]
+        if agent_lines:
+            last_agent_text = agent_lines[-1].lower()
+            if any(k in last_agent_text for k in ["full name", "date of birth", "dob", "phone number", "email address"]):
+                logger.debug("SymptomAnalyzer: skipping because we are in the demographics phase (Phase 3)")
+                return
+
         # 1. Query Pinecone for relevant ICD-10 conditions
         # Use the last patient utterance as the query
         patient_lines = [t for t in transcript if t.startswith("Patient:")]
@@ -189,9 +225,34 @@ class SymptomAnalyzer:
             logger.error("Cerebras API error in SymptomAnalyzer: %s", exc)
             return
 
-        # 3. Parse and validate
+        # 3. Parse, validate, and compute clinical urgency deterministically
         analysis = _parse_analysis(raw_text)
-        score = int(analysis.get("urgency_score", 5))
+        
+        # Implement the Decoupled Triage Engine Logic:
+        indicators = analysis.get("indicators")
+        if indicators is None:
+            # Backward-compatibility fallback: use raw LLM score (e.g. for existing mocks/tests)
+            score = int(analysis.get("urgency_score", 4))
+        else:
+            has_emergency_flag = (
+                indicators.get("cardiac_red_flags", False) or
+                indicators.get("respiratory_distress", False) or
+                indicators.get("stroke_neurological_deficits", False) or
+                indicators.get("active_uncontrolled_bleeding", False) or
+                indicators.get("active_self_harm_or_suicidal_intent", False)
+            )
+
+            if has_emergency_flag:
+                # Overrides to Clinical Emergency
+                if indicators.get("respiratory_distress") or indicators.get("active_self_harm_or_suicidal_intent"):
+                    score = 1  # Immediate
+                else:
+                    score = 2  # Emergency
+            else:
+                # If no emergency flags are active, force score to be at least 3 (Urgent / Routine)
+                raw_score = int(analysis.get("urgency_score", 4))
+                score = max(3, raw_score)
+
         score = max(1, min(5, score))  # clamp to [1, 5]
 
         # 4. Update shared state
@@ -203,9 +264,14 @@ class SymptomAnalyzer:
         )
         self.state["symptoms"] = analysis.get("symptoms", [])
         self.state["icd_matches"] = icd_matches
-        self.state["required_specialty"] = analysis.get(
-            "required_specialty", self.state.get("required_specialty")
-        )
+        new_specialty = analysis.get("required_specialty")
+        current_specialty = self.state.get("required_specialty")
+        if new_specialty:
+            if current_specialty and current_specialty != "General Practice" and new_specialty == "General Practice":
+                # Preserve the more specific specialty already found in previous turns
+                pass
+            else:
+                self.state["required_specialty"] = new_specialty
 
         logger.info(
             "Analyzer update | room=%s score=%d label=%s specialty=%s",
