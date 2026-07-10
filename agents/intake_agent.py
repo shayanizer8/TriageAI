@@ -1,5 +1,5 @@
 """
-Intake Agent — Claude Haiku 3.5, voice I/O via LiveKit.
+Intake Agent.
 
 Responsibilities:
   1. Greet the patient
@@ -37,37 +37,35 @@ Your role is to collect information from the patient during a phone call.
 
 Your tone: calm, empathetic, clear. Never use medical jargon the patient won't understand.
 
-CONVERSATION ORDER — follow this exact sequence:
+CONVERSATION ORDER — You MUST complete each step in sequence (Step 1 to Step 12). Do NOT skip to a later step or jump to appointment booking until all preceding steps are fully answered:
 
-PHASE 1 — CHIEF COMPLAINT (ask first, before any demographics):
-  1. "What brings you in today?" — the patient's main reason for calling.
-
-PHASE 2 — CLINICAL FOLLOW-UPS (adapt to what the patient describes):
-  2. Onset/trigger — "Did something specific trigger this — like an injury, activity, or event — or did it come on by itself?" Ask this for EVERY complaint.
-  3. Duration — "How long has this been going on?"
-  4. Severity — "On a scale of 1 to 10, how would you rate it?"
-  5. Complaint-specific questions (pick what's relevant):
-     - PAIN complaints: Ask exactly where the pain is and whether it spreads or radiates to other areas.
-     - SKIN complaints: Ask if it's spreading, itchy, or changing.
-     - RESPIRATORY complaints: Ask about difficulty breathing, cough type (dry/wet), and fever.
-     - GI complaints: Ask about nausea, vomiting, and appetite changes.
-     - NEUROLOGICAL complaints: Ask about dizziness, vision changes, or numbness.
-  6. Current treatment — "Have you tried anything for it so far — any medication, rest, or home remedies?"
-  7. Allergies — "Do you have any known medication allergies?"
-
-PHASE 3 — PATIENT DEMOGRAPHICS (collect after clinical picture is clear):
-  8. Full name
-  9. Date of birth
-  10. Phone number
-  11. Email address — After the patient states their email, spell it back character by character for confirmation. Use hyphens between characters. Example: "So that's J-O-H-N dot D-O-E at G-M-A-I-L dot com — is that right?" Wait for the patient to confirm before moving on.
+Step 1. CHIEF COMPLAINT: Ask "What brings you in today?" (the patient's main reason for calling).
+Step 2. ONSET/TRIGGER: Ask "Did something specific trigger this — like an injury, activity, or event — or did it come on by itself?" (Ask this for EVERY complaint).
+Step 3. DURATION: Ask "How long has this been going on?"
+Step 4. SEVERITY: Ask "On a scale of 1 to 10, how would you rate it?"
+Step 5. COMPLAINT-SPECIFIC QUESTIONS: Ask the relevant sub-questions based on the complaint:
+    - PAIN: Ask exactly where the pain is and whether it spreads or radiates.
+    - SKIN: Ask if it's spreading, itchy, or changing.
+    - RESPIRATORY: Ask about difficulty breathing, cough type, and fever.
+    - GI: Ask about nausea, vomiting, and appetite changes.
+    - NEUROLOGICAL: Ask about dizziness, vision changes, or numbness.
+Step 6. AMBIGUOUS / RED-FLAG PROBING: If the patient describes a boundary symptom (e.g. general tightness, numbness, headache, breathing discomfort), ask clarifying questions to rule out emergency flags (e.g. for tightness, ask if it's in the chest or throat; for headache, ask if it started like a sudden thunderclap).
+Step 7. CURRENT TREATMENT: Ask "Have you tried anything for it so far — any medication, rest, or home remedies?"
+Step 8. ALLERGIES: Ask "Do you have any known medication allergies?"
+Step 9. PATIENT NAME: Ask the patient for their full name.
+Step 10. PATIENT DOB: Ask the patient for their date of birth.
+Step 11. PATIENT PHONE: Ask the patient for their phone number.
+Step 12. PATIENT EMAIL: Ask the patient for their email address. After they state it, spell it back character by character with hyphens (e.g., "So that's J-O-H-N at G-M-A-I-L dot com — is that right?") and confirm it.
+Step 13. BOOKING TRIGGER: ONLY when Steps 1 through 12 are fully completed, say EXACTLY: "Thank you. Let me check available appointments for you now." Do NOT say this phrase or check slots until Step 12 (Email confirmation) has been completed.
 
 RULES:
 - Ask ONE question at a time. Do not overwhelm the patient.
+- Do NOT speak the step numbers, step names, or step progress updates (e.g., do NOT say "Step 1", "Step 2", "Step 1 complete", or "Phase 3"). Converse naturally and ask the questions as a human assistant would.
 - If the patient sounds distressed, acknowledge it: "I can hear this is worrying you, you're doing great."
 - If the patient says something like "chest pain", "can't breathe", "stroke", "unconscious" — immediately
-  say: "This sounds very serious. Please hold while I connect you to emergency services."
+  say: "This sounds very serious. Please hang up and call 9-1-1 immediately."
   Then stop asking questions.
-- When ALL information is collected (including clinical follow-ups and all demographics: name, date of birth, phone, and email), say EXACTLY: "Thank you. Let me check available appointments for you now." Do NOT say this phrase or anything containing "check available appointments" until ALL demographics have been collected.
+- You MUST explicitly ask for and collect all four demographics in Steps 9, 10, 11, and 12. Do NOT skip any of these details under any circumstances.
 - Keep responses SHORT (under 30 words). This is a phone call, not a chat.
 """
 
@@ -94,7 +92,11 @@ class IntakeAgent:
         # Build the LiveKit voice Agent (v1.6.x API)
         self._agent = Agent(
             instructions=INTAKE_SYSTEM_PROMPT,
-            vad=silero.VAD.load(),
+            vad=silero.VAD.load(
+                activation_threshold=0.6,
+                min_speech_duration=0.3,
+                min_silence_duration=0.3,
+            ),
             stt=groq.STT(
                 model="whisper-large-v3-turbo",
                 language="en",
@@ -133,13 +135,13 @@ class IntakeAgent:
         logger.info("Intake Agent started in room: %s", self.state["room_id"])
 
     async def set_silent_standby(self) -> None:
-        """Put the agent in silent standby mode so its LLM does not respond during booking."""
+        """Put the agent in silent standby mode (instructions + manual turn detection)."""
         logger.info("Setting IntakeAgent to silent standby mode")
-        if self._session:
-            try:
-                self._session.update_options(turn_detection="manual")
-            except Exception as e:
-                logger.warning("Failed to set turn_detection to manual: %s", e)
+        # if self._session:
+        #     try:
+        #         self._session.update_options(turn_detection="manual")
+        #     except Exception as e:
+        #         logger.warning("Failed to set turn_detection to manual: %s", e)
         await self._agent.update_instructions(
             "You are in silent standby mode. Under no circumstances should you speak, respond, or generate any text. "
             "Remain completely silent."
@@ -149,10 +151,22 @@ class IntakeAgent:
         """Block until intake is complete (or interrupted)."""
         await self._completion_event.wait()
 
+    @staticmethod
+    def _sanitize_for_tts(text: str) -> str:
+        """Expand abbreviations that TTS engines mispronounce."""
+        import re
+        # "Dr." or "Dr " at word boundary -> "Doctor "
+        text = re.sub(r'\bDr\.\s*', 'Doctor ', text)
+        text = re.sub(r'\bDr\s', 'Doctor ', text)
+        return text
+
     async def say(self, text: str) -> None: # for confirmation/emergency messages.
         """Make the agent speak (used for confirmation/emergency messages)."""
         if self._session:
-            self._session.say(text, allow_interruptions=False)
+            try:
+                self._session.say(self._sanitize_for_tts(text), allow_interruptions=False)
+            except Exception as e:
+                logger.warning("Failed to speak message (session may be closing/draining): %s", e)
 
     async def interrupt_for_emergency(self) -> None:
         """
@@ -166,7 +180,7 @@ class IntakeAgent:
         if self._session:
             self._session.say(
                 "I need to stop you there — what you're describing sounds like a medical emergency. "
-                "Please call 9-1-1 immediately, or stay on the line and I will connect you now.",
+                "Please hang up and call 9-1-1 immediately.",
                 allow_interruptions=False,
             )
         self._completion_event.set()
