@@ -9,8 +9,6 @@ from email.mime.text import MIMEText
 
 from openai import AsyncOpenAI
 import openai
-import httpx
-from twilio.rest import Client as TwilioClient
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from graph.state import TriageState
@@ -94,19 +92,7 @@ async def generate_summary(state: TriageState) -> str:
     return response.choices[0].message.content
 
 
-async def send_sms(phone: str, message: str) -> bool:
-    try:
-        client = TwilioClient(settings.twilio_account_sid, settings.twilio_auth_token)
-        msg = client.messages.create(
-            body=message[:1600],  # Twilio SMS limit
-            from_=settings.twilio_phone_number,
-            to=phone,
-        )
-        logger.info("SMS sent | SID=%s to=%s", msg.sid, phone)
-        return True
-    except Exception as exc:
-        logger.error("Twilio SMS error: %s", exc)
-        return False
+
 
 
 def _send_email_sync(to_email: str, patient_name: str, message: str) -> bool:
@@ -190,11 +176,7 @@ class FollowupAgent:
             )
             result["summary"] = summary
 
-        # 2. Send SMS (if phone available)
-        phone = self.state.get("patient_phone")
-        if phone:
-            sms_message = f"{settings.hospital_name} Triage:\n\n{summary}"
-            result["sms_sent"] = await send_sms(phone, sms_message)
+
 
         # 3. Send email (if email available)
         email = self.state.get("patient_email")
