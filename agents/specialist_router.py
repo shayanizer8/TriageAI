@@ -167,6 +167,37 @@ class SpecialistRouter:
             api_key=settings.mistral_api_key,
             base_url="https://api.mistral.ai/v1",
         )
+        # Normalize the required specialty stored in state to match the DB exactly
+        if self.state.get("required_specialty"):
+            self.state["required_specialty"] = self._normalize_specialty(self.state["required_specialty"])
+
+    @staticmethod
+    def _normalize_specialty(specialty: str) -> str:
+        """Map common specialty spellings, typos, and synonyms to the exact DB specialty names."""
+        if not specialty:
+            return "General Practice"
+        norm = specialty.strip().lower()
+        if "ortho" in norm:
+            return "Orthopaedics"
+        if "pediatr" in norm or "paediatr" in norm:
+            return "Paediatrics"
+        if "cardio" in norm:
+            return "Cardiology"
+        if "emergency" in norm:
+            return "Emergency Medicine"
+        if "neuro" in norm:
+            return "Neurology"
+        if "pulmon" in norm:
+            return "Pulmonology"
+        if "gastro" in norm:
+            return "Gastroenterology"
+        if "dermat" in norm:
+            return "Dermatology"
+        if "psych" in norm:
+            return "Psychiatry"
+        if "general practice" in norm or "gp" in norm or "general medicine" in norm or "family" in norm:
+            return "General Practice"
+        return specialty.title()
 
     async def find_candidate_slots(self, max_slots: int = 2) -> list[dict]:
         """
