@@ -90,8 +90,7 @@ class TestTriageGraph:
         state["patient_id"] = "e89c3ab2-cd6e-4c7c-aa6c-34d678be32fb"
         state["call_id"] = "a89c3ab2-cd6e-4c7c-aa6c-34d678be32fa"
 
-        with patch("agents.specialist_router.SpecialistRouter.route_and_book", new_callable=AsyncMock) as mock_route, \
-             patch("agents.followup_agent.FollowupAgent.run", new_callable=AsyncMock) as mock_run:
+        with patch("agents.specialist_router.SpecialistRouter.route_and_book", new_callable=AsyncMock) as mock_route:
 
             mock_route.return_value = {
                 "doctor_name": "Dr. Anna Thompson",
@@ -106,7 +105,6 @@ class TestTriageGraph:
                 "datetime": "2026-07-01T10:00:00Z",
                 "appointment_id": "test-appointment-id",
             }
-            mock_run.return_value = {"sms_sent": True, "email_sent": True}
 
             from graph.triage_graph import triage_graph
             result = await triage_graph.ainvoke(state)
@@ -121,10 +119,7 @@ class TestTriageGraph:
         state["urgency_score"] = 1
         state["urgency_label"] = "EMERGENCY"
 
-        with patch("agents.specialist_router.SpecialistRouter.route_and_book", new_callable=AsyncMock) as mock_route, \
-             patch("agents.followup_agent.FollowupAgent.run", new_callable=AsyncMock) as mock_run:
-
-            mock_run.return_value = {"sms_sent": True, "email_sent": True}
+        with patch("agents.specialist_router.SpecialistRouter.route_and_book", new_callable=AsyncMock) as mock_route:
 
             from graph.triage_graph import triage_graph
             result = await triage_graph.ainvoke(state)

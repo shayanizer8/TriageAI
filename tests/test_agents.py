@@ -114,21 +114,18 @@ class TestFollowupAgent:
         }
 
         with patch("agents.followup_agent.generate_summary", new_callable=AsyncMock) as mock_summary, \
-             patch("agents.followup_agent.send_sms", new_callable=AsyncMock) as mock_sms, \
              patch("agents.followup_agent.send_email", new_callable=AsyncMock) as mock_email:
 
             mock_summary.return_value = "Your appointment is confirmed."
-            mock_sms.return_value = True
             mock_email.return_value = True
 
             from agents.followup_agent import FollowupAgent
             agent = FollowupAgent(state)
             result = await agent.run()
 
-            assert result["sms_sent"] is True
+            assert result["sms_sent"] is False
             assert result["email_sent"] is True
             assert state["followup_sent"] is True
-            mock_sms.assert_called_once()
             mock_email.assert_called_once()
 
 
