@@ -94,6 +94,13 @@ async def _trigger_followup(room_name: str, event_payload: dict) -> None:
 
         state = json.loads(state_raw)
 
+        if state.get("followup_sent"):
+            logger.info("Follow-up already sent for room %s — skipping webhook trigger", room_name)
+            # Clean up Redis key after follow-up is verified
+            await redis.delete(state_key)
+            await redis.aclose()
+            return
+
         agent = FollowupAgent(state)
         result = await agent.run()
 
