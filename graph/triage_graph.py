@@ -136,7 +136,7 @@ async def confirmation_node(state: TriageState) -> dict:
 # ---------------------------------------------------------------------------
 async def followup_node(state: TriageState) -> dict:
     """
-    Triggers the FollowupAgent to send SMS + email post-call.
+    Triggers the FollowupAgent to send email post-call.
     """
     agent = FollowupAgent(state)
     result = await agent.run()
