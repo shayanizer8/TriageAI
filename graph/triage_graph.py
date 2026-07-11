@@ -59,19 +59,21 @@ async def emergency_node(state: TriageState) -> dict:
 # ---------------------------------------------------------------------------
 async def router_node(state: TriageState) -> dict:
     """
-    Invokes the SpecialistRouter to query Mock HIS API and book a slot.
+    Invokes the SpecialistRouter to find candidate appointment slots.
+    Does NOT book — the entrypoint handles interactive confirmation with the patient.
     """
     router = SpecialistRouter(state)
-    appointment = await router.route_and_book()
+    candidates = await router.find_candidate_slots(max_slots=2)
 
-    if appointment:
+    if candidates:
         return {
-            "appointment_details": state.get("appointment_details"),  # set by tool call
+            "candidate_slots": candidates,
             "path": "ROUTINE",
         }
     else:
-        logger.error("Router failed — falling back to manual booking for room: %s", state.get("room_id"))
+        logger.error("Router found no slots — falling back for room: %s", state.get("room_id"))
         return {
+            "candidate_slots": [],
             "appointment_details": {
                 "doctor_name": "On-call GP",
                 "specialty": state.get("required_specialty", "General Practice"),
@@ -115,8 +117,7 @@ async def confirmation_node(state: TriageState) -> dict:
     if path == "EMERGENCY":
         confirmation_text = (
             "Based on your symptoms, I am flagging this as an emergency. "
-            "Please go to the Emergency Department immediately or call 9-1-1. "
-            "Our staff have been alerted."
+            "Please go to the Emergency Department immediately. "
         )
     else:
         confirmation_text = (
@@ -154,7 +155,7 @@ def build_triage_graph():
     Build and compile the LangGraph StateGraph for post-intake routing.
 
     Graph structure:
-      START → supervisor → [emergency | router] → confirmation → followup → END
+      START → supervisor → [emergency | router] → confirmation → END
     """
     graph = StateGraph(TriageState)
 
@@ -163,7 +164,6 @@ def build_triage_graph():
     graph.add_node("emergency", emergency_node)
     graph.add_node("router", router_node)
     graph.add_node("confirmation", confirmation_node)
-    graph.add_node("followup", followup_node)
 
     # Edges
     graph.add_edge(START, "supervisor")
@@ -177,8 +177,7 @@ def build_triage_graph():
     )
     graph.add_edge("emergency", "confirmation")
     graph.add_edge("router", "confirmation")
-    graph.add_edge("confirmation", "followup")
-    graph.add_edge("followup", END)
+    graph.add_edge("confirmation", END)
 
     return graph.compile()
 
