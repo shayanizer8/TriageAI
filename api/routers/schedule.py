@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from db.database import get_db
-from db.models import Doctor, Slot, Appointment, Patient
+from db.models import Doctor, Slot, Appointment, Patient, Call
 from api.models import (
     DoctorResponse,
     SlotResponse,
@@ -83,6 +83,32 @@ async def book_appointment(
     Book a slot for a patient.
     Atomically marks the slot as booked and creates an Appointment record.
     """
+    # 1. Ensure patient and call records exist (auto-heal if DB was offline at start of call)
+    from datetime import date, datetime, timezone
+    patient_res = await db.execute(select(Patient).where(Patient.id == payload.patient_id))
+    patient = patient_res.scalar_one_or_none()
+    if not patient:
+        patient = Patient(
+            id=payload.patient_id,
+            name="Unknown Patient",
+            dob=date(1900, 1, 1),
+            phone=f"+1{str(uuid.uuid4().int)[:10]}",
+            email="unknown@example.com",
+        )
+        db.add(patient)
+
+    if payload.call_id:
+        call_res = await db.execute(select(Call).where(Call.id == payload.call_id))
+        call = call_res.scalar_one_or_none()
+        if not call:
+            call = Call(
+                id=payload.call_id,
+                room_id="unknown-booking",
+                started_at=datetime.now(timezone.utc),
+                patient_id=payload.patient_id,
+            )
+            db.add(call)
+
     # 1. Load the slot with its doctor
     stmt = (
         select(Slot)
