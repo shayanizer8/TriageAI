@@ -192,7 +192,7 @@ class SymptomAnalyzer:
             logger.debug("SymptomAnalyzer: skipping short utterance: %s", latest_patient_text)
             return
 
-        # Debounce 2: Rate limit calls to Cerebras to at most once every 10 seconds.
+        # Debounce 2: Rate limit calls to at most once every 10 seconds.
         import time
         now = time.time()
         if now - self._last_run_time < 10.0:
